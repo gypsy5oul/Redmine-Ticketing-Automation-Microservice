@@ -1,0 +1,478 @@
+services:
+  # ============================================================================
+  # Infrastructure Services
+  # ============================================================================
+  #
+  # NOTE: PostgreSQL and Redis are NOT defined here!
+  # They run from the old docker-compose.yml in the parent directory.
+  # This docker-compose connects to them via the devops-network.
+  #
+  # To start postgres and redis from old app:
+  #   cd /home/user/Redmine-Ticketing-Automatio
+  #   docker-compose up -d postgres redis
+  #
+  # ============================================================================
+
+  # Kong Database (Separate PostgreSQL for Kong)
+  kong-database:
+    image: postgres:15-alpine
+    container_name: kong-database
+    environment:
+      POSTGRES_DB: kong
+      POSTGRES_USER: kong
+      POSTGRES_PASSWORD: ${KONG_PG_PASSWORD:-kong_password_change_this}
+      TZ: ${TZ:-Asia/Kolkata}
+    volumes:
+      - kong_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kong"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # Kong Migrations (Run once to initialize Kong database)
+  kong-migrations:
+    image: kong:3.4
+    container_name: kong-migrations
+    command: kong migrations bootstrap
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: kong-database
+      KONG_PG_PORT: 5432
+      KONG_PG_USER: kong
+      KONG_PG_PASSWORD: ${KONG_PG_PASSWORD:-kong_password_change_this}
+      KONG_PG_DATABASE: kong
+    depends_on:
+      kong-database:
+        condition: service_healthy
+    networks:
+      - microservices-network
+    restart: on-failure
+
+  # Kong API Gateway
+  kong:
+    image: kong:3.4
+    container_name: kong-gateway
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: kong-database
+      KONG_PG_PORT: 5432
+      KONG_PG_USER: kong
+      KONG_PG_PASSWORD: ${KONG_PG_PASSWORD:-kong_password_change_this}
+      KONG_PG_DATABASE: kong
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8444
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+    ports:
+      - "8000:8000"   # Kong Proxy (Main entry point for API)
+      - "8443:8443"   # Kong Proxy SSL
+      - "8444:8444"   # Kong Admin API
+      - "8445:8445"   # Kong Admin API SSL
+    depends_on:
+      kong-database:
+        condition: service_healthy
+      kong-migrations:
+        condition: service_completed_successfully
+    networks:
+      - microservices-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # RabbitMQ Message Queue
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: devops-tickets-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-devops_user}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-devops_password_change_this}
+      TZ: ${TZ:-Asia/Kolkata}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"   # AMQP protocol
+      - "15672:15672" # Management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # Microservices (All 11 Services)
+  # ============================================================================
+
+  # 1. Auth Service (Port 8001)
+  auth-service:
+    build:
+      context: .
+      dockerfile: production-services/auth-service/Dockerfile
+    container_name: auth-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8001
+    ports:
+      - "8001:8001"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 2. Ticket Service (Port 8002)
+  ticket-service:
+    build:
+      context: .
+      dockerfile: production-services/ticket-service/Dockerfile
+    container_name: ticket-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      REDMINE_BASE_URL: ${REDMINE_BASE_URL}
+      REDMINE_API_KEY: ${REDMINE_API_KEY}
+      LLM_ENABLED: ${LLM_ENABLED:-true}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8002
+    ports:
+      - "8002:8002"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 3. Team Service (Port 8003)
+  team-service:
+    build:
+      context: .
+      dockerfile: production-services/team-service/Dockerfile
+    container_name: team-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8003
+    ports:
+      - "8003:8003"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 4. SLA Service (Port 8004)
+  sla-service:
+    build:
+      context: .
+      dockerfile: production-services/sla-service/Dockerfile
+    container_name: sla-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8004
+    ports:
+      - "8004:8004"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 5. Workload Service (Port 8005)
+  workload-service:
+    build:
+      context: .
+      dockerfile: production-services/workload-service/Dockerfile
+    container_name: workload-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8005
+    ports:
+      - "8005:8005"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 6. Analytics Service (Port 8006)
+  analytics-service:
+    build:
+      context: .
+      dockerfile: production-services/analytics-service/Dockerfile
+    container_name: analytics-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8006
+    ports:
+      - "8006:8006"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 7. Escalation Service (Port 8007)
+  escalation-service:
+    build:
+      context: .
+      dockerfile: production-services/escalation-service/Dockerfile
+    container_name: escalation-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8007
+    ports:
+      - "8007:8007"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8007/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 8. Collaboration Service (Port 8008)
+  collaboration-service:
+    build:
+      context: .
+      dockerfile: production-services/collaboration-service/Dockerfile
+    container_name: collaboration-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8008
+    ports:
+      - "8008:8008"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 9. Integration Service (Port 8009)
+  integration-service:
+    build:
+      context: .
+      dockerfile: production-services/integration-service/Dockerfile
+    container_name: integration-service
+    environment:
+      REDMINE_BASE_URL: ${REDMINE_BASE_URL}
+      REDMINE_API_KEY: ${REDMINE_API_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8009
+    ports:
+      - "8009:8009"
+    networks:
+      - microservices-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8009/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 10. Scheduling Service (Port 8010)
+  scheduling-service:
+    build:
+      context: .
+      dockerfile: production-services/scheduling-service/Dockerfile
+    container_name: scheduling-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8010
+    ports:
+      - "8010:8010"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 11. Project Service (Port 8011)
+  # Note: Work sessions are handled in ticket-service
+  project-service:
+    build:
+      context: .
+      dockerfile: production-services/project-service/Dockerfile
+    container_name: project-service
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_PORT: 8011
+    ports:
+      - "8011:8011"
+    networks:
+      - microservices-network
+      - devops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8011/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================================
+  # Frontend (React Application)
+  # ============================================================================
+
+  # Frontend Admin Portal
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.microservices
+    container_name: devops-tickets-frontend
+    environment:
+      TZ: ${TZ:-Asia/Kolkata}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    ports:
+      - "3000:80"
+    depends_on:
+      kong:
+        condition: service_healthy
+    networks:
+      - microservices-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  kong_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+
+networks:
+  microservices-network:
+    driver: bridge
+  # External network to connect to postgres and redis from old app
+  # Docker Compose prefixes network names with the project directory name
+  devops-network:
+    name: redmine-automation-v3_devops-network
+    external: true

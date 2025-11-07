@@ -1,0 +1,7 @@
+# Base requirements for all production services
+# These reference the shared requirements and add service-specific needs
+
+# Install shared requirements first
+-r ../../shared/requirements.txt
+
+# Additional service-specific dependencies can be added in each service's requirements.txt

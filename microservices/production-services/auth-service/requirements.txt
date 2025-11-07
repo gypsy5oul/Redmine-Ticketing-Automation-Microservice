@@ -1,0 +1,6 @@
+# Auth Service Requirements
+# Inherits from shared requirements
+
+-r ../../shared/requirements.txt
+
+# No additional service-specific dependencies needed
