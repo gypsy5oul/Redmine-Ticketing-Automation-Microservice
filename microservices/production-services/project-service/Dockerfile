@@ -8,8 +8,13 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy shared requirements first (needed by service requirements.txt)
+COPY shared/requirements.txt /app/shared/requirements.txt
+
+# Copy service requirements
 COPY production-services/project-service/requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy shared utilities (authentication and logging)
@@ -19,11 +24,11 @@ COPY shared /app/shared
 COPY production-services/project-service/main.py .
 
 # Expose port
-EXPOSE 8011
+EXPOSE 8012
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8011/health', timeout=5)"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8012/health', timeout=5)"
 
 # Run service
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8011"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8012"]

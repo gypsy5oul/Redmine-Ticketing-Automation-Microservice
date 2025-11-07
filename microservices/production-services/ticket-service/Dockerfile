@@ -9,7 +9,10 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+# Copy shared requirements first (needed by service requirements.txt)
+COPY shared/requirements.txt /app/shared/requirements.txt
+
+# Copy service requirements
 COPY production-services/ticket-service/requirements.txt .
 
 # Install Python dependencies
