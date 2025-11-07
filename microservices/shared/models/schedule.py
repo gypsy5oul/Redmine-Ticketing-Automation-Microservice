@@ -21,7 +21,7 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 
 from shared.core.database import Base
-from app.models.team import TeamLevel
+from shared.models.team import TeamLevel
 
 
 class ShiftAssignment(Base):
