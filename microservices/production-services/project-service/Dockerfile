@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy shared requirements first (needed by service requirements.txt)
-COPY shared/requirements.txt /app/shared/requirements.txt
+# Service requirements.txt uses "../../shared/requirements.txt" which resolves to /shared/requirements.txt
+COPY shared/requirements.txt /shared/requirements.txt
 
 # Copy service requirements
 COPY production-services/project-service/requirements.txt .
